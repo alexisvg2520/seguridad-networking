@@ -1,24 +1,25 @@
-name: Deploy Networking (networking.yaml)
+name: Deploy Networking private/public
 
 on:
   push:
     branches: [ main ]
     paths:
-      - 'ocsecurity.yaml'
-      - '.github/workflows/deploy-ocsecurity.yml'
+      - 'private.yaml'
+      - 'public.yaml'
+      - '.github/workflows/deploy.yml'
   workflow_dispatch: {}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
       - name: Install OC CLI
         run: |
-          curl -L https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz | tar xz
+          curl -Ls https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz | tar xz oc
           sudo mv oc /usr/local/bin/
-          oc version
+          oc version --client
 
       - name: Login to OpenShift
         uses: redhat-actions/oc-login@v1
@@ -26,15 +27,43 @@ jobs:
           openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
           openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
           namespace: ${{ secrets.OPENSHIFT_NAMESPACE }}
-          # Si tu clúster tiene TLS propio/privado y necesitas saltarte verificación pon esto en true:
           # insecure_skip_tls_verify: true
 
       - name: Select project
         run: oc project ${{ secrets.OPENSHIFT_NAMESPACE }}
 
-      - name: Apply ocsecurity.yaml
+      - name: Apply YAMLs (private/public)
         run: |
-          # Validación rápida del YAML y vista previa
-          oc apply --dry-run=server -f networking.yaml
-          # Aplicación real
-          oc apply -f networking.yaml
+          set -euo pipefail
+          for f in private.yaml public.yaml; do
+            if [ -f "$f" ]; then
+              echo "==> Applying $f"
+              oc apply -f "$f"
+              # Si en el archivo hay BuildConfig(s), dispara sus builds y espera:
+              BCS=$(oc get -f "$f" -o name 2>/dev/null | grep -E '^buildconfigs?\.build\.openshift\.io/' || true)
+              if [ -n "$BCS" ]; then
+                echo "$BCS" | while read -r res; do
+                  name=$(basename "$res")
+                  echo "==> start-build $name"
+                  oc start-build "$name" --follow --wait
+                done
+              fi
+            fi
+          done
+
+      - name: Wait for rollouts (Deployments/DCs)
+        run: |
+          set -euo pipefail
+          for f in private.yaml public.yaml; do
+            [ -f "$f" ] || continue
+            oc get -f "$f" -o name 2>/dev/null | while read -r res; do
+              case "$res" in
+                deployments.apps/*)
+                  oc rollout status "deployment/${res##*/}" --timeout=5m
+                  ;;
+                deploymentconfigs.apps.openshift.io/*)
+                  oc rollout status "dc/${res##*/}" --timeout=5m
+                  ;;
+              esac
+            done
+          done
