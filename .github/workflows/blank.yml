@@ -35,6 +35,6 @@ jobs:
       - name: Apply ocsecurity.yaml
         run: |
           # Validación rápida del YAML y vista previa
-          oc apply --dry-run=server -f ocsecurity.yaml
+          oc apply --dry-run=server -f networking.yaml
           # Aplicación real
           oc apply -f networking.yaml
